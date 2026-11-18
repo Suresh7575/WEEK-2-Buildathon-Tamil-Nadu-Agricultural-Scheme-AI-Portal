@@ -1,0 +1,17 @@
+CMD 1 — FastAPI
+cd /d "D:\Personal\GenAI Program\WEEK 2 · Buildathon Tamil Nadu Agricultural Scheme AI Portal\Agricultural_Scheme_AI"
+venv314\Scripts\activate
+python -m uvicorn backend.main:app --reload
+
+CMD 2 — Streamlit
+
+cd /d "D:\Personal\GenAI Program\WEEK 2 · Buildathon Tamil Nadu Agricultural Scheme AI Portal\Agricultural_Scheme_AI"
+venv314\Scripts\activate
+python -m streamlit run frontend\app.py
+
+
+gemini-code-1795018492495
+python -m streamlit run frontend\Customapp.py
+
+
+Coverage: Works & Benefits:

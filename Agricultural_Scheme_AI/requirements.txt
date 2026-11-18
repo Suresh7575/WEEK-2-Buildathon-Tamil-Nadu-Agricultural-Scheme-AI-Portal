@@ -1,0 +1,27 @@
+# Frontend
+streamlit
+
+# Backend
+fastapi
+uvicorn
+python-multipart
+requests
+
+# LangChain
+langchain
+langchain-core
+langchain-openai
+langchain-community
+langchain-text-splitters
+
+# PDF Processing
+pypdf
+
+# Vector Database
+faiss-cpu
+
+# Environment
+python-dotenv
+
+# Hybrid Search - Phase 2
+rank-bm25
