@@ -1,157 +1,165 @@
+"""PDF ingestion utilities for the Tamil Nadu Agricultural Scheme AI portal.
 
+New PDFs are appended to the existing FAISS index. Existing vectors are not
+rebuilt or deleted. A SHA-256 manifest prevents the same PDF being indexed twice.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
 import os
+import re
+from io import BytesIO
 from pathlib import Path
+from typing import Iterable
 
 from dotenv import load_dotenv
-from langchain_community.document_loaders import PyPDFLoader
+from pypdf import PdfReader
+from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS	
+from langchain_community.vectorstores import FAISS
 
-
-# Project directory
 BASE_DIR = Path(__file__).resolve().parent.parent
-
-# PDF directory
 PDF_FOLDER = BASE_DIR / "data" / "pdfs"
 VECTORSTORE_DIR = BASE_DIR / "vectorstore"
+MANIFEST_PATH = VECTORSTORE_DIR / "ingested_pdfs.json"
+load_dotenv(BASE_DIR / ".env", override=False)
 
-# Load environment variables
-load_dotenv(BASE_DIR / ".env", override=True)
+
+def get_embeddings() -> OpenAIEmbeddings:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY is missing. Add it to the project .env file.")
+    return OpenAIEmbeddings(
+        model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+        api_key=api_key,
+    )
 
 
-def load_pdf_documents():
+def _read_manifest() -> dict:
+    if not MANIFEST_PATH.exists():
+        return {}
+    try:
+        return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
 
-    documents = []
 
-    pdf_files = list(PDF_FOLDER.glob("*.pdf"))
+def _write_manifest(data: dict) -> None:
+    VECTORSTORE_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = MANIFEST_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(MANIFEST_PATH)
 
-    if not pdf_files:
-        raise FileNotFoundError(
-            f"No PDF files found in: {PDF_FOLDER}"
-        )
 
-    print(f"Found {len(pdf_files)} PDF files.")
+def _safe_filename(filename: str) -> str:
+    name = Path(filename or "uploaded_scheme.pdf").name
+    name = re.sub(r"[^A-Za-z0-9._() -]", "_", name).strip(" .")
+    if not name.lower().endswith(".pdf"):
+        name += ".pdf"
+    return name or "uploaded_scheme.pdf"
 
-    for pdf_file in pdf_files:
 
-        print(f"\nLoading: {pdf_file.name}")
+def extract_pdf_documents(pdf_bytes: bytes, filename: str) -> list[Document]:
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("The uploaded file is not a valid PDF document.")
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes))
+    except Exception as exc:
+        raise ValueError(f"Could not open PDF: {exc}") from exc
 
-        loader = PyPDFLoader(str(pdf_file))
-
-        pages = loader.load()
-
-        documents.extend(pages)
-
-        print(f"Pages extracted: {len(pages)}")
-
-    print("\nPDF ingestion completed.")
-
-    print(f"Total pages: {len(documents)}")
-
+    documents: list[Document] = []
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = (page.extract_text() or "").strip()
+        if text:
+            documents.append(Document(
+                page_content=text,
+                metadata={"source": filename, "page": page_number, "page_label": str(page_number)},
+            ))
+    if not documents:
+        raise ValueError("No selectable text was found. This may be a scanned PDF; OCR is not enabled yet.")
     return documents
 
 
-def split_documents(documents):
+def add_pdf_to_index(pdf_bytes: bytes, filename: str) -> dict:
+    """Save and index one PDF, appending chunks to the existing FAISS index."""
+    filename = _safe_filename(filename)
+    digest = hashlib.sha256(pdf_bytes).hexdigest()
+    manifest = _read_manifest()
+    if digest in manifest:
+        return {"filename": filename, "status": "already_indexed", "pages": manifest[digest].get("pages", 0), "chunks": manifest[digest].get("chunks", 0)}
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=150
-    )
+    # The starter project already contains PDFs and a prebuilt FAISS index,
+    # but may not have an ingestion manifest. Match uploaded bytes against
+    # the existing PDF folder to avoid adding those same source files twice.
+    PDF_FOLDER.mkdir(parents=True, exist_ok=True)
+    for existing_pdf in PDF_FOLDER.glob("*.pdf"):
+        try:
+            if hashlib.sha256(existing_pdf.read_bytes()).hexdigest() == digest:
+                return {"filename": existing_pdf.name, "status": "already_indexed", "pages": 0, "chunks": 0}
+        except OSError:
+            continue
 
-    chunks = text_splitter.split_documents(documents)
+    documents = extract_pdf_documents(pdf_bytes, filename)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    chunks = splitter.split_documents(documents)
+    if not chunks:
+        raise ValueError("No searchable text chunks could be created from this PDF.")
 
-    print("\nText splitting completed.")
-
-    print(f"Total chunks created: {len(chunks)}")
-
-    return chunks
-
-
-def test_embeddings(chunks):
-
-    api_key = os.getenv("OPENAI_API_KEY")
-
-    if not api_key:
-        raise ValueError(
-            "OPENAI_API_KEY not found. Check your .env file."
+    embeddings = get_embeddings()
+    index_file = VECTORSTORE_DIR / "index.faiss"
+    if index_file.exists():
+        store = FAISS.load_local(
+            str(VECTORSTORE_DIR), embeddings,
+            allow_dangerous_deserialization=True,
         )
+        store.add_documents(chunks)
+    else:
+        VECTORSTORE_DIR.mkdir(parents=True, exist_ok=True)
+        store = FAISS.from_documents(chunks, embeddings)
 
-    model_name = os.getenv(
-        "OPENAI_EMBEDDING_MODEL",
-        "text-embedding-3-small"
-    )
+    # Persist the expanded index before marking this file as ingested.
+    store.save_local(str(VECTORSTORE_DIR))
+    PDF_FOLDER.mkdir(parents=True, exist_ok=True)
+    destination = PDF_FOLDER / filename
+    if destination.exists() and hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
+        destination = PDF_FOLDER / f"{Path(filename).stem}_{digest[:8]}.pdf"
+    destination.write_bytes(pdf_bytes)
 
-    print(f"\nEmbedding model: {model_name}")
+    manifest[digest] = {"filename": destination.name, "pages": len(documents), "chunks": len(chunks)}
+    _write_manifest(manifest)
+    return {"filename": destination.name, "status": "indexed", "pages": len(documents), "chunks": len(chunks)}
 
-    embeddings = OpenAIEmbeddings(
-        model=model_name
-    )
 
-    # Test only two chunks to limit API usage
-    sample_texts = [
-        chunk.page_content
-        for chunk in chunks[:2]
-    ]
+def load_pdf_documents() -> list[Document]:
+    """Load all PDFs in data/pdfs for a full initial index build."""
+    documents: list[Document] = []
+    PDF_FOLDER.mkdir(parents=True, exist_ok=True)
+    for pdf_path in sorted(PDF_FOLDER.glob("*.pdf")):
+        documents.extend(extract_pdf_documents(pdf_path.read_bytes(), pdf_path.name))
+    if not documents:
+        raise FileNotFoundError(f"No readable PDF files found in {PDF_FOLDER}")
+    return documents
 
-    if not sample_texts:
-        raise ValueError("No text chunks available.")
 
-    vectors = embeddings.embed_documents(sample_texts)
+def split_documents(documents: Iterable[Document]) -> list[Document]:
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    return splitter.split_documents(list(documents))
 
-    print("\nEmbedding test successful!")
 
-    print(f"Chunks tested: {len(vectors)}")
-
-    print(f"Vector dimensions: {len(vectors[0])}")
-
-    return embeddings
-
-def create_vector_store(chunks, embeddings):
-
-    print("\nCreating FAISS vector database...")
-
-    vector_store = FAISS.from_documents(
-        documents=chunks,
-        embedding=embeddings
-    )
-
-    # Create folder if it does not exist
+def create_vector_store(chunks: list[Document], embeddings=None) -> FAISS:
+    if not chunks:
+        raise ValueError("No text chunks available to index.")
+    embeddings = embeddings or get_embeddings()
     VECTORSTORE_DIR.mkdir(parents=True, exist_ok=True)
+    store = FAISS.from_documents(chunks, embeddings)
+    store.save_local(str(VECTORSTORE_DIR))
+    return store
 
-    # Save FAISS database
-    vector_store.save_local("vectorstore")
-
-    print("\nFAISS database created successfully!")
-
-    print(f"Total chunks stored: {len(chunks)}")
-
-    print(f"Database location: {VECTORSTORE_DIR}")
-
-    return vector_store
 
 if __name__ == "__main__":
-
-    # Step 1: Extract PDF text
-    documents = load_pdf_documents()
-
-    # Step 2: Split extracted text
-    chunks = split_documents(documents)
-
-    # Step 3: Show a sample chunk
-    print("\nFirst chunk preview:")
-
-    print(chunks[0].page_content[:300])
-
-    print("\nFirst chunk metadata:")
-
-    print(chunks[0].metadata)
-
-    # Step 4: Test OpenAI embeddings
-    # Step 4: Test OpenAI embeddings
-    embeddings = test_embeddings(chunks)
-
-    # Step 5: Create and save FAISS database
-    vector_store = create_vector_store(chunks, embeddings)
-
-    print("\nCOMPLETED SUCCESSFULLY")
+    pages = load_pdf_documents()
+    chunks = split_documents(pages)
+    create_vector_store(chunks)
+    print(f"Indexed {len(pages)} pages into {len(chunks)} searchable chunks.")

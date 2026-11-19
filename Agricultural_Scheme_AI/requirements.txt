@@ -1,27 +1,18 @@
-# Frontend
-streamlit
+# Web application
+streamlit>=1.38.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+requests>=2.32.0
 
-# Backend
-fastapi
-uvicorn
-python-multipart
-requests
+# RAG and PDF processing
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+langchain-community>=0.3.0
+langchain-text-splitters>=0.3.0
+pypdf>=5.0.0
+faiss-cpu>=1.9.0
 
-# LangChain
-langchain
-langchain-core
-langchain-openai
-langchain-community
-langchain-text-splitters
-
-# PDF Processing
-pypdf
-
-# Vector Database
-faiss-cpu
-
-# Environment
-python-dotenv
-
-# Hybrid Search - Phase 2
-rank-bm25
+# Configuration
+python-dotenv>=1.0.1
