@@ -7,6 +7,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
 from langchain_core.messages import HumanMessage, AIMessage
 
+
 # --------------------------------------------------
 # 1. LOAD ENVIRONMENT VARIABLES
 # --------------------------------------------------
